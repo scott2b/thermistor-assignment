@@ -19,17 +19,72 @@ jobs:
       - name: Install dependencies
         run: pip install numpy pytest
 
-      - name: Run tests
+      - name: Run tests and compute grade
         run: |
           set -o pipefail
-          echo "## Assignment Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if pytest test_thermistor.py -v --tb=short 2>&1 | tee results.txt; then
-            echo "✅ **All tests passed!**" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ **Some tests failed.** See details below." >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat results.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Run pytest with JUnit XML output
+          pytest test_thermistor.py -v --tb=short --junitxml=results.xml 2>&1 | tee results.txt || true
+
+          # Compute grade from XML
+          python3 << 'GRADE_SCRIPT'
+          import xml.etree.ElementTree as ET
+
+          points = {
+              'TestCalculateCurrent': 20,
+              'TestCalculateResistance': 20,
+              'TestBetaTemperature': 30,
+              'TestSelfHeating': 10,
+              'TestFullPipeline': 20,
+          }
+
+          tree = ET.parse('results.xml')
+          root = tree.getroot()
+
+          earned = {}
+          details = []
+
+          for suite_name, max_pts in points.items():
+              tests = [tc for tc in root.iter('testcase') if tc.get('classname', '').endswith(suite_name)]
+              total = len(tests)
+              passed = sum(1 for tc in tests if tc.find('failure') is None and tc.find('error') is None)
+
+              if total > 0:
+                  earned_pts = round(max_pts * passed / total, 1)
+              else:
+                  earned_pts = 0
+
+              earned[suite_name] = earned_pts
+              status = "✅" if passed == total else "❌"
+              details.append(f"| {suite_name} | {passed}/{total} | {earned_pts}/{max_pts} | {status} |")
+
+          total_earned = sum(earned.values())
+          total_possible = sum(points.values())
+
+          # Write summary
+          with open('summary.md', 'w') as f:
+              f.write(f"## Assignment Grade: {total_earned}/{total_possible}\n\n")
+              f.write("| Section | Tests Passed | Points | Status |\n")
+              f.write("|---------|-------------|--------|--------|\n")
+              for line in details:
+                  f.write(line + "\n")
+              f.write(f"\n**Total: {total_earned}/{total_possible}**\n")
+
+          # Also write machine-readable grade
+          with open('grade.txt', 'w') as f:
+              f.write(f"{total_earned}\n")
+
+          print(f"Grade: {total_earned}/{total_possible}")
+          GRADE_SCRIPT
+
+      - name: Post summary
+        run: cat summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload grade artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grade
+          path: |
+            grade.txt
+            summary.md
+            results.xml
